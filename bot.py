@@ -1,161 +1,238 @@
-import logging
-import json
 import os
+import logging
+from aiohttp import web
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import ParseMode
 import asyncio
-from datetime import datetime
-from collections import defaultdict
-from typing import Dict, List, Tuple, Any
 
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardButton, 
-    InlineKeyboardMarkup
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-# Настройка логирования для Render
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Получение токена из переменных окружения
-API_TOKEN = os.getenv('API_TOKEN', '8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E')
+# Автоматическая подстановка токена
+BOT_TOKEN = "8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E"
 
-# Инициализация бота
-bot = Bot(token=API_TOKEN)
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(bot, storage=storage)
 
-# Глобальные хранилища данных
-polls = {}
-poll_id_counter = 1
-admin_polls = defaultdict(list)
-poll_results = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-user_progress = {}
-user_message_map = {}
+# Определение состояний для опроса
+class PollStates(StatesGroup):
+    AGE = State()
+    GENDER = State()
+    EDUCATION = State()
+    INTERESTS = State()
 
-# Классы состояний (остаются без изменений)
-class PollCreationStates(StatesGroup):
-    awaiting_poll_name = State()
-    awaiting_question_text = State()
-    awaiting_answer_options = State()
-    awaiting_next_action = State()
-    awaiting_new_question = State()
+# Обработчик команды /start
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
+    logger.info(f"Пользователь {message.from_user.id} запустил бота")
+    
+    welcome_text = """
+👋 Привет! Добро пожаловать в бот для опросов!
 
-class PollEditStates(StatesGroup):
-    selecting_question = State()
-    editing_question = State()
-    editing_answers = State()
+Я помогу вам пройти небольшой опрос. Для начала используйте команду /poll
 
-# Функции для работы с данными (адаптированные для Render)
-def load_data():
-    """Загрузка данных из файла"""
-    global polls, admin_polls, poll_results, poll_id_counter
+Доступные команды:
+/poll - Начать опрос
+/help - Получить справку
+    """
+    
+    await message.answer(welcome_text)
+
+# Обработчик команды /help
+@dp.message_handler(commands=['help'])
+async def cmd_help(message: types.Message):
+    help_text = """
+ℹ️ Справка по боту:
+
+/poll - Начать опрос. Вам будут заданы вопросы о возрасте, поле, образовании и интересах.
+
+Опрос состоит из 4 простых вопросов. Вы можете прервать опрос в любой момент, отправив /cancel
+    """
+    await message.answer(help_text)
+
+# Обработчик команды /poll - начало опроса
+@dp.message_handler(commands=['poll'])
+async def start_poll(message: types.Message):
+    logger.info(f"Пользователь {message.from_user.id} начал опрос")
+    
+    await message.answer("📝 Начинаем опрос!\n\nПожалуйста, укажите ваш возраст:")
+    await PollStates.AGE.set()
+
+# Обработчик отмены опроса
+@dp.message_handler(commands=['cancel'], state='*')
+async def cancel_poll(message: types.Message, state: FSMContext):
+    logger.info(f"Пользователь {message.from_user.id} отменил опрос")
+    
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Опрос не активен.")
+        return
+    
+    await state.finish()
+    await message.answer("❌ Опрос прерван. Вы можете начать заново с помощью /poll")
+
+# Обработчик возраста
+@dp.message_handler(state=PollStates.AGE)
+async def process_age(message: types.Message, state: FSMContext):
+    age_text = message.text.strip()
+    
+    # Проверка валидности возраста
+    if not age_text.isdigit() or not (1 <= int(age_text) <= 120):
+        await message.answer("❌ Пожалуйста, введите корректный возраст (число от 1 до 120):")
+        return
+    
+    age = int(age_text)
+    await state.update_data(age=age)
+    logger.info(f"Пользователь {message.from_user.id} указал возраст: {age}")
+    
+    # Создаем клавиатуру для выбора пола
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Мужской", "Женский")
+    keyboard.add("Другой")
+    
+    await message.answer("Выберите ваш пол:", reply_markup=keyboard)
+    await PollStates.GENDER.set()
+
+# Обработчик пола
+@dp.message_handler(state=PollStates.GENDER)
+async def process_gender(message: types.Message, state: FSMContext):
+    gender = message.text.strip()
+    valid_genders = ["Мужской", "Женский", "Другой"]
+    
+    if gender not in valid_genders:
+        await message.answer("❌ Пожалуйста, выберите пол из предложенных вариантов:")
+        return
+    
+    await state.update_data(gender=gender)
+    logger.info(f"Пользователь {message.from_user.id} указал пол: {gender}")
+    
+    # Создаем клавиатуру для выбора образования
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Среднее", "Среднее специальное")
+    keyboard.add("Высшее", "Учусь")
+    keyboard.add("Другое")
+    
+    await message.answer("Укажите ваше образование:", reply_markup=keyboard)
+    await PollStates.EDUCATION.set()
+
+# Обработчик образования
+@dp.message_handler(state=PollStates.EDUCATION)
+async def process_education(message: types.Message, state: FSMContext):
+    education = message.text.strip()
+    valid_education = ["Среднее", "Среднее специальное", "Высшее", "Учусь", "Другое"]
+    
+    if education not in valid_education:
+        await message.answer("❌ Пожалуйста, выберите вариант из предложенных:")
+        return
+    
+    await state.update_data(education=education)
+    logger.info(f"Пользователь {message.from_user.id} указал образование: {education}")
+    
+    # Убираем клавиатуру
+    keyboard = types.ReplyKeyboardRemove()
+    
+    await message.answer("📚 Расскажите о ваших интересах или увлечениях:", reply_markup=keyboard)
+    await PollStates.INTERESTS.set()
+
+# Обработчик интересов (завершение опроса)
+@dp.message_handler(state=PollStates.INTERESTS)
+async def process_interests(message: types.Message, state: FSMContext):
+    interests = message.text.strip()
+    
+    if len(interests) < 5:
+        await message.answer("❌ Пожалуйста, напишите немного подробнее о ваших интересах:")
+        return
+    
+    await state.update_data(interests=interests)
+    logger.info(f"Пользователь {message.from_user.id} указал интересы: {interests}")
+    
+    # Получаем все данные из состояния
+    user_data = await state.get_data()
+    
+    # Формируем результат опроса
+    result_text = f"""
+✅ Опрос завершен! Спасибо за участие!
+
+📊 Ваши ответы:
+• Возраст: {user_data.get('age')}
+• Пол: {user_data.get('gender')}
+• Образование: {user_data.get('education')}
+• Интересы: {user_data.get('interests')}
+
+Вы можете пройти опрос еще раз с помощью /poll
+    """
+    
+    await message.answer(result_text)
+    await state.finish()
+    
+    logger.info(f"Опрос пользователя {message.from_user.id} завершен успешно")
+
+# Обработчик любых других сообщений
+@dp.message_handler()
+async def handle_other_messages(message: types.Message):
+    logger.info(f"Получено сообщение от {message.from_user.id}: {message.text}")
+    
+    response_text = """
+🤖 Я бот для проведения опросов.
+
+Используйте команды:
+/start - Начало работы
+/poll - Начать опрос
+/help - Получить справку
+/cancel - Отменить текущий опрос
+    """
+    
+    await message.answer(response_text)
+
+# Обработка ошибок
+@dp.errors_handler()
+async def errors_handler(update: types.Update, exception: Exception):
+    logger.error(f"Ошибка при обработке update {update}: {exception}")
+    return True
+
+# HTTP-сервер для Render.com
+async def handle_health_check(request):
+    """Обработчик health-check запросов от Render"""
+    return web.Response(text="Bot is running!")
+
+async def start_bot():
+    """Запуск бота"""
+    logger.info("=== Запуск бота на Render.com ===")
     
     try:
-        # На Render используем относительный путь
-        if os.path.exists('poll_data.json'):
-            with open('poll_data.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                polls = data.get('polls', {})
-                
-                admin_polls_data = data.get('admin_polls', {})
-                for admin_id, poll_ids in admin_polls_data.items():
-                    admin_polls[int(admin_id)] = poll_ids
-                
-                poll_results_data = data.get('poll_results', {})
-                for poll_id_str, questions in poll_results_data.items():
-                    poll_id = int(poll_id_str)
-                    for q_idx_str, answers in questions.items():
-                        q_idx = int(q_idx_str)
-                        for answer, count in answers.items():
-                            poll_results[poll_id][q_idx][answer] = count
-                
-                poll_id_counter = data.get('poll_id_counter', 1)
-                logger.info("Данные успешно загружены")
-                
-    except Exception as e:
-        logger.error(f"Ошибка загрузки данных: {e}")
-
-def save_data():
-    """Сохранение данных в файл"""
-    try:
-        data = {
-            'polls': polls,
-            'admin_polls': {str(k): v for k, v in admin_polls.items()},
-            'poll_results': {
-                str(poll_id): {
-                    str(q_idx): dict(answers) 
-                    for q_idx, answers in questions.items()
-                } 
-                for poll_id, questions in poll_results.items()
-            },
-            'poll_id_counter': poll_id_counter
-        }
+        # Создаем HTTP-сервер
+        app = web.Application()
+        app.router.add_get('/health', handle_health_check)
+        app.router.add_get('/', handle_health_check)
         
-        with open('poll_data.json', 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # Получаем порт из переменных окружения (Render автоматически назначает порт)
+        port = int(os.environ.get('PORT', 5000))
         
-        logger.info("Данные успешно сохранены")
-    except Exception as e:
-        logger.error(f"Ошибка сохранения данных: {e}")
-
-# Валидационные функции (без изменений)
-def validate_poll_name(name: str) -> Tuple[bool, str]:
-    if not name or not name.strip():
-        return False, "Название опроса не может быть пустым"
-    if len(name) > 100:
-        return False, "Название опроса не может превышать 100 символов"
-    return True, ""
-
-def validate_question_text(text: str) -> Tuple[bool, str]:
-    if not text or not text.strip():
-        return False, "Текст вопроса не может быть пустым"
-    if len(text) > 300:
-        return False, "Текст вопроса не может превышать 300 символов"
-    return True, ""
-
-def validate_answer_options(options: List[str]) -> Tuple[bool, str]:
-    if not options or len(options) == 0:
-        return False, "Должен быть хотя бы один вариант ответа"
-    if len(options) > 10:
-        return False, "Не может быть более 10 вариантов ответа"
-    for option in options:
-        if not option.strip():
-            return False, "Вариант ответа не может быть пустым"
-        if len(option) > 50:
-            return False, "Вариант ответа не может превышать 50 символов"
-    return True, ""
-
-# Остальные функции бота остаются БЕЗ ИЗМЕНЕНИЙ
-# [Вставь сюда весь остальной код из предыдущей версии]
-# Команды: start, help, cancel, main_menu, create_poll_start, и т.д.
-# Все обработчики сообщений и callback'ов
-
-# Только добавь эту функцию в конец файла:
-async def main():
-    """Главная функция для запуска бота"""
-    # Загружаем данные при запуске
-    load_data()
-    
-    # Удаляем веб-хук (на всякий случай)
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    logger.info("Бот запущен на Render.com!")
-    
-    # Запускаем опрос обновлений
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    # Запускаем бота с обработкой ошибок
-    try:
-        asyncio.run(main())
+        # Запускаем HTTP-сервер в фоне
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"HTTP-сервер запущен на порту {port}")
+        
+        # Запускаем бота
+        logger.info("Запуск polling бота...")
+        await dp.start_polling()
+        
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
+    finally:
+        logger.info("Бот остановлен")
+
+if __name__ == '__main__':
+    # Запускаем бота и HTTP-сервер
+    asyncio.run(start_bot())

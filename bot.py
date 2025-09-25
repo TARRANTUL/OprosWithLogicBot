@@ -5,7 +5,7 @@ import uuid
 import asyncio
 import signal
 import sys
-from aiohttp import web
+from aiohttp import web, ClientTimeout
 from datetime import datetime
 from collections import defaultdict
 import re
@@ -39,14 +39,14 @@ logger = logging.getLogger(__name__)
 # Глобальная переменная для отслеживания состояния бота
 bot_instance_running = False
 
-# Инициализация бота
+# Инициализация бота с правильными параметрами
 API_TOKEN = '8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E'
+
+# Создаем бота с правильными настройками
 bot = Bot(
     token=API_TOKEN, 
     default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML,
-        request_timeout=30,
-        connect_timeout=10
+        parse_mode=ParseMode.HTML
     )
 )
 
@@ -448,7 +448,7 @@ async def configure_answer(callback: CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text(
         f"Настройка ответа: *{selected_answer['text']}*\n\n"
-        "Выберите действие при выборе этого ответа:",
+        "Выберите действие при выбора этого ответа:",
         reply_markup=keyboard.as_markup(),
         parse_mode="Markdown"
     )

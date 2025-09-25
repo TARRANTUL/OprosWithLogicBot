@@ -1,12 +1,13 @@
 import os
 import logging
+import asyncio
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.types import ParseMode
-import asyncio
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 # Настройка логирования
 logging.basicConfig(
@@ -15,13 +16,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Автоматическая подстановка токена
+# Токен бота
 BOT_TOKEN = "8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E"
 
-# Инициализация бота и диспетчера
-bot = Bot(token=BOT_TOKEN)
+# Инициализация бота и диспетчера для aiogram 3.x
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
 # Определение состояний для опроса
 class PollStates(StatesGroup):
@@ -31,7 +32,7 @@ class PollStates(StatesGroup):
     INTERESTS = State()
 
 # Обработчик команды /start
-@dp.message_handler(commands=['start'])
+@dp.message(types.F.text == '/start')
 async def cmd_start(message: types.Message):
     logger.info(f"Пользователь {message.from_user.id} запустил бота")
     
@@ -48,7 +49,7 @@ async def cmd_start(message: types.Message):
     await message.answer(welcome_text)
 
 # Обработчик команды /help
-@dp.message_handler(commands=['help'])
+@dp.message(types.F.text == '/help')
 async def cmd_help(message: types.Message):
     help_text = """
 ℹ️ Справка по боту:
@@ -60,15 +61,16 @@ async def cmd_help(message: types.Message):
     await message.answer(help_text)
 
 # Обработчик команды /poll - начало опроса
-@dp.message_handler(commands=['poll'])
-async def start_poll(message: types.Message):
+@dp.message(types.F.text == '/poll')
+async def start_poll(message: types.Message, state: FSMContext):
     logger.info(f"Пользователь {message.from_user.id} начал опрос")
     
     await message.answer("📝 Начинаем опрос!\n\nПожалуйста, укажите ваш возраст:")
-    await PollStates.AGE.set()
+    await state.set_state(PollStates.AGE)
 
 # Обработчик отмены опроса
-@dp.message_handler(commands=['cancel'], state='*')
+@dp.message(types.F.text == '/cancel')
+@dp.message(types.F.text.casefold() == 'отмена')
 async def cancel_poll(message: types.Message, state: FSMContext):
     logger.info(f"Пользователь {message.from_user.id} отменил опрос")
     
@@ -77,11 +79,11 @@ async def cancel_poll(message: types.Message, state: FSMContext):
         await message.answer("Опрос не активен.")
         return
     
-    await state.finish()
+    await state.clear()
     await message.answer("❌ Опрос прерван. Вы можете начать заново с помощью /poll")
 
 # Обработчик возраста
-@dp.message_handler(state=PollStates.AGE)
+@dp.message(PollStates.AGE)
 async def process_age(message: types.Message, state: FSMContext):
     age_text = message.text.strip()
     
@@ -95,15 +97,19 @@ async def process_age(message: types.Message, state: FSMContext):
     logger.info(f"Пользователь {message.from_user.id} указал возраст: {age}")
     
     # Создаем клавиатуру для выбора пола
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("Мужской", "Женский")
-    keyboard.add("Другой")
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="Мужской"), types.KeyboardButton(text="Женский")],
+            [types.KeyboardButton(text="Другой")]
+        ],
+        resize_keyboard=True
+    )
     
     await message.answer("Выберите ваш пол:", reply_markup=keyboard)
-    await PollStates.GENDER.set()
+    await state.set_state(PollStates.GENDER)
 
 # Обработчик пола
-@dp.message_handler(state=PollStates.GENDER)
+@dp.message(PollStates.GENDER)
 async def process_gender(message: types.Message, state: FSMContext):
     gender = message.text.strip()
     valid_genders = ["Мужской", "Женский", "Другой"]
@@ -116,16 +122,20 @@ async def process_gender(message: types.Message, state: FSMContext):
     logger.info(f"Пользователь {message.from_user.id} указал пол: {gender}")
     
     # Создаем клавиатуру для выбора образования
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("Среднее", "Среднее специальное")
-    keyboard.add("Высшее", "Учусь")
-    keyboard.add("Другое")
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="Среднее"), types.KeyboardButton(text="Среднее специальное")],
+            [types.KeyboardButton(text="Высшее"), types.KeyboardButton(text="Учусь")],
+            [types.KeyboardButton(text="Другое")]
+        ],
+        resize_keyboard=True
+    )
     
     await message.answer("Укажите ваше образование:", reply_markup=keyboard)
-    await PollStates.EDUCATION.set()
+    await state.set_state(PollStates.EDUCATION)
 
 # Обработчик образования
-@dp.message_handler(state=PollStates.EDUCATION)
+@dp.message(PollStates.EDUCATION)
 async def process_education(message: types.Message, state: FSMContext):
     education = message.text.strip()
     valid_education = ["Среднее", "Среднее специальное", "Высшее", "Учусь", "Другое"]
@@ -141,10 +151,10 @@ async def process_education(message: types.Message, state: FSMContext):
     keyboard = types.ReplyKeyboardRemove()
     
     await message.answer("📚 Расскажите о ваших интересах или увлечениях:", reply_markup=keyboard)
-    await PollStates.INTERESTS.set()
+    await state.set_state(PollStates.INTERESTS)
 
 # Обработчик интересов (завершение опроса)
-@dp.message_handler(state=PollStates.INTERESTS)
+@dp.message(PollStates.INTERESTS)
 async def process_interests(message: types.Message, state: FSMContext):
     interests = message.text.strip()
     
@@ -172,12 +182,12 @@ async def process_interests(message: types.Message, state: FSMContext):
     """
     
     await message.answer(result_text)
-    await state.finish()
+    await state.clear()
     
     logger.info(f"Опрос пользователя {message.from_user.id} завершен успешно")
 
 # Обработчик любых других сообщений
-@dp.message_handler()
+@dp.message()
 async def handle_other_messages(message: types.Message):
     logger.info(f"Получено сообщение от {message.from_user.id}: {message.text}")
     
@@ -193,19 +203,13 @@ async def handle_other_messages(message: types.Message):
     
     await message.answer(response_text)
 
-# Обработка ошибок
-@dp.errors_handler()
-async def errors_handler(update: types.Update, exception: Exception):
-    logger.error(f"Ошибка при обработке update {update}: {exception}")
-    return True
-
 # HTTP-сервер для Render.com
 async def handle_health_check(request):
     """Обработчик health-check запросов от Render"""
     return web.Response(text="Bot is running!")
 
-async def start_bot():
-    """Запуск бота"""
+async def main():
+    """Основная функция запуска"""
     logger.info("=== Запуск бота на Render.com ===")
     
     try:
@@ -214,7 +218,7 @@ async def start_bot():
         app.router.add_get('/health', handle_health_check)
         app.router.add_get('/', handle_health_check)
         
-        # Получаем порт из переменных окружения (Render автоматически назначает порт)
+        # Получаем порт из переменных окружения
         port = int(os.environ.get('PORT', 5000))
         
         # Запускаем HTTP-сервер в фоне
@@ -226,13 +230,14 @@ async def start_bot():
         
         # Запускаем бота
         logger.info("Запуск polling бота...")
-        await dp.start_polling()
+        await dp.start_polling(bot)
         
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
+        raise
     finally:
+        await bot.session.close()
         logger.info("Бот остановлен")
 
 if __name__ == '__main__':
-    # Запускаем бота и HTTP-сервер
-    asyncio.run(start_bot())
+    asyncio.run(main())

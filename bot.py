@@ -3,6 +3,7 @@ import logging
 import asyncio
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -32,7 +33,7 @@ class PollStates(StatesGroup):
     INTERESTS = State()
 
 # Обработчик команды /start
-@dp.message(types.F.text == '/start')
+@dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     logger.info(f"Пользователь {message.from_user.id} запустил бота")
     
@@ -49,7 +50,7 @@ async def cmd_start(message: types.Message):
     await message.answer(welcome_text)
 
 # Обработчик команды /help
-@dp.message(types.F.text == '/help')
+@dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = """
 ℹ️ Справка по боту:
@@ -61,7 +62,7 @@ async def cmd_help(message: types.Message):
     await message.answer(help_text)
 
 # Обработчик команды /poll - начало опроса
-@dp.message(types.F.text == '/poll')
+@dp.message(Command("poll"))
 async def start_poll(message: types.Message, state: FSMContext):
     logger.info(f"Пользователь {message.from_user.id} начал опрос")
     
@@ -69,8 +70,8 @@ async def start_poll(message: types.Message, state: FSMContext):
     await state.set_state(PollStates.AGE)
 
 # Обработчик отмены опроса
-@dp.message(types.F.text == '/cancel')
-@dp.message(types.F.text.casefold() == 'отмена')
+@dp.message(Command("cancel"))
+@dp.message(lambda message: message.text and message.text.lower() == 'отмена')
 async def cancel_poll(message: types.Message, state: FSMContext):
     logger.info(f"Пользователь {message.from_user.id} отменил опрос")
     
@@ -208,25 +209,27 @@ async def handle_health_check(request):
     """Обработчик health-check запросов от Render"""
     return web.Response(text="Bot is running!")
 
+async def start_http_server():
+    """Запуск HTTP сервера для Render"""
+    app = web.Application()
+    app.router.add_get('/health', handle_health_check)
+    app.router.add_get('/', handle_health_check)
+    
+    port = int(os.environ.get('PORT', 5000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"HTTP-сервер запущен на порту {port}")
+    return runner
+
 async def main():
     """Основная функция запуска"""
     logger.info("=== Запуск бота на Render.com ===")
     
     try:
-        # Создаем HTTP-сервер
-        app = web.Application()
-        app.router.add_get('/health', handle_health_check)
-        app.router.add_get('/', handle_health_check)
-        
-        # Получаем порт из переменных окружения
-        port = int(os.environ.get('PORT', 5000))
-        
-        # Запускаем HTTP-сервер в фоне
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
-        logger.info(f"HTTP-сервер запущен на порту {port}")
+        # Запускаем HTTP сервер
+        http_runner = await start_http_server()
         
         # Запускаем бота
         logger.info("Запуск polling бота...")

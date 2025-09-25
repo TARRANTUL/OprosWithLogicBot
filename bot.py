@@ -3,6 +3,8 @@ import json
 import os
 import uuid
 import asyncio
+import signal
+import sys
 from aiohttp import web
 from datetime import datetime
 from collections import defaultdict
@@ -21,17 +23,35 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, TelegramConflictError
 
-# Настройка логирования
+# Настройка логирования с улучшенным форматом
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота
+# Глобальная переменная для отслеживания состояния бота
+bot_instance_running = False
+
+# Инициализация бота с улучшенными настройками
 API_TOKEN = '8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E'
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+# Создаем бота с улучшенными параметрами для избежания конфликтов
+bot = Bot(
+    token=API_TOKEN, 
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML,
+        request_timeout=30,
+        connect_timeout=10
+    )
+)
+
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -43,6 +63,25 @@ poll_results = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # {po
 user_progress = {}  # {user_id: (poll_id, current_question_idx, [answers])}
 active_polls = {}  # {message_id: (poll_id, question_idx)} для удаления сообщений
 user_message_map = {}  # {user_id: {poll_id: message_id}} для отслеживания сообщений пользователей
+
+# Добавляем блокировку для избежания конфликтов
+polling_lock = asyncio.Lock()
+
+# Обработчики сигналов для корректного завершения
+def signal_handler(signum, frame):
+    """Обработчик сигналов для graceful shutdown"""
+    global bot_instance_running
+    logger.info(f"Получен сигнал {signum}, завершаем работу...")
+    bot_instance_running = False
+    asyncio.create_task(shutdown())
+
+async def shutdown():
+    """Корректное завершение работы бота"""
+    logger.info("Завершение работы бота...")
+    await bot.session.close()
+    # Сохраняем данные перед выходом
+    save_data()
+    logger.info("Бот успешно завершил работу")
 
 # Состояния для создания опроса
 class PollCreationStates(StatesGroup):
@@ -113,6 +152,53 @@ def save_data():
         logger.info("Данные успешно сохранены")
     except Exception as e:
         logger.error(f"Ошибка сохранения данных: {e}")
+
+# Улучшенная функция для обработки конфликтов
+async def safe_polling():
+    """Безопасный запуск polling с обработкой конфликтов"""
+    global bot_instance_running
+    
+    max_retries = 5
+    base_delay = 2
+    retry_count = 0
+    
+    while retry_count < max_retries and bot_instance_running:
+        try:
+            async with polling_lock:
+                logger.info(f"Запуск polling (попытка {retry_count + 1})")
+                await dp.start_polling(bot)
+                break  # Если успешно завершился
+                
+        except TelegramConflictError as e:
+            retry_count += 1
+            logger.warning(f"Конфликт обнаружен (попытка {retry_count}): {e}")
+            
+            if retry_count >= max_retries:
+                logger.error("Достигнуто максимальное количество попыток. Завершаем работу.")
+                break
+                
+            delay = base_delay * (2 ** retry_count)  # Экспоненциальная задержка
+            logger.info(f"Ожидание {delay} секунд перед повторной попыткой...")
+            await asyncio.sleep(delay)
+            
+        except TelegramRetryAfter as e:
+            logger.warning(f"Telegram требует подождать: {e.retry_after} сек.")
+            await asyncio.sleep(e.retry_after)
+            
+        except TelegramNetworkError as e:
+            retry_count += 1
+            logger.warning(f"Сетевая ошибка (попытка {retry_count}): {e}")
+            
+            if retry_count >= max_retries:
+                logger.error("Достигнуто максимальное количество попыток. Завершаем работу.")
+                break
+                
+            delay = base_delay * (2 ** retry_count)
+            await asyncio.sleep(delay)
+            
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка: {e}")
+            break
 
 # Валидация названия опроса
 def validate_poll_name(name: str) -> Tuple[bool, str]:
@@ -1025,6 +1111,12 @@ async def start_http_server():
 
 async def main():
     """Основная функция запуска"""
+    global bot_instance_running
+    
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     logger.info("=== Запуск бота для создания опросов с логическими ветвлениями ===")
     
     # Загружаем данные при запуске
@@ -1034,14 +1126,18 @@ async def main():
         # Запускаем HTTP сервер
         http_runner = await start_http_server()
         
-        # Запускаем бота
-        logger.info("Запуск polling бота...")
-        await dp.start_polling(bot)
+        # Устанавливаем флаг запуска
+        bot_instance_running = True
+        
+        # Запускаем безопасный polling
+        logger.info("Запуск безопасного polling бота...")
+        await safe_polling()
         
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
         raise
     finally:
+        bot_instance_running = False
         await bot.session.close()
         logger.info("Бот остановлен")
 

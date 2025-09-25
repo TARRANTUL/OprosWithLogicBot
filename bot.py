@@ -176,136 +176,109 @@ def validate_question_text(text: str) -> Tuple[bool, str]:
         return False, "Текст вопроса не может превышать 300 символов"
     return True, ""
 
-def validate_answer_options(options: List[str]) -> Tuple[bool, str]:
-    if not options or len(options) == 0:
-        return False, "Должен быть хотя бы один вариант ответа"
-    if len(options) > 10:
-        return False, "Не может быть более 10 вариантов ответа"
-    for option in options:
-        if not option.strip():
-            return False, "Вариант ответа не может быть пустым"
-        if len(option) > 50:
-            return False, "Вариант ответа не может превышать 50 символов"
+def validate_answer_text(text: str) -> Tuple[bool, str]:
+    if not text or not text.strip():
+        return False, "Текст ответа не может быть пустым"
+    if len(text) > 50:
+        return False, "Текст ответа не может превышать 50 символов"
     return True, ""
 
-# Парсер структуры опроса
-def parse_poll_structure(text: str) -> Tuple[bool, Optional[Dict], str]:
+# Парсер структуры опроса с использованием отступов
+def parse_poll_structure_with_indents(text: str) -> Tuple[bool, Optional[Dict], str]:
     """
-    Парсит структуру опроса из текста
+    Парсит структуру опроса из текста с отступами (табы или пробелы)
     Возвращает: (успех, данные_опроса, сообщение_об_ошибке)
     """
     try:
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        lines = [line.rstrip() for line in text.split('\n') if line.strip()]
         if not lines:
             return False, None, "Структура опроса не может быть пустой"
         
+        # Нормализуем отступы: заменяем пробелы на табы для единообразия
+        normalized_lines = []
+        for i, line in enumerate(lines):
+            # Определяем уровень вложенности по отступам
+            indent_level = 0
+            stripped_line = line.lstrip()
+            indent_str = line[:len(line) - len(stripped_line)]
+            
+            # Подсчитываем табы и группы по 2 пробела
+            tab_count = indent_str.count('\t')
+            space_count = indent_str.count(' ')
+            indent_level = tab_count + (space_count // 2)
+            
+            normalized_lines.append((indent_level, stripped_line, i + 1))
+        
         poll_data = {'questions': []}
-        question_stack = []  # Стек для отслеживания текущего уровня вопросов
+        stack = []  # Стек для отслеживания текущей позиции в дереве
         current_question = None
         
-        for i, line in enumerate(lines):
-            line_num = i + 1
+        for indent_level, line, line_num in normalized_lines:
+            # Определяем, является ли строка вопросом или ответом
+            # По умолчанию: нечетные уровни - вопросы, четные - ответы
+            # Уровень 0: корневой вопрос
             
-            # Определяем уровень вопроса/ответа
-            if line.startswith('?'):
-                # Это вопрос
-                level = 0
-                temp_line = line
-                while temp_line.startswith('?'):
-                    level += 1
-                    temp_line = temp_line[1:].lstrip()
-                
-                # Извлекаем текст вопроса (в кавычках)
-                if not (temp_line.startswith('"') and temp_line.endswith('"')):
-                    return False, None, f"Строка {line_num}: текст вопроса должен быть в кавычках"
-                
-                question_text = temp_line[1:-1].strip()
-                if not question_text:
-                    return False, None, f"Строка {line_num}: текст вопроса не может быть пустым"
-                
+            if indent_level % 2 == 0:  # Четный уровень - вопрос
                 # Валидация текста вопроса
-                is_valid, error_msg = validate_question_text(question_text)
+                is_valid, error_msg = validate_question_text(line)
                 if not is_valid:
                     return False, None, f"Строка {line_num}: {error_msg}"
                 
-                # Создаем новый вопрос
                 new_question = {
-                    'text': question_text,
+                    'text': line,
                     'answers': [],
-                    'level': level
+                    'level': indent_level // 2
                 }
                 
-                if level == 1:
-                    # Корневой вопрос
+                if indent_level == 0:  # Корневой вопрос
                     if poll_data['questions']:
-                        return False, None, f"Строка {line_num}: может быть только один корневой вопрос (уровень 1)"
+                        return False, None, f"Строка {line_num}: может быть только один корневой вопрос (уровень 0)"
                     poll_data['questions'].append(new_question)
                     current_question = new_question
-                    question_stack = [new_question]
+                    stack = [(0, new_question)]  # (уровень, вопрос)
                 else:
                     # Подвопрос - должен следовать после ответа
-                    if level > len(question_stack) + 1:
-                        return False, None, f"Строка {line_num}: пропущены промежуточные уровни"
+                    expected_level = stack[-1][0] + 1 if stack else 0
+                    if indent_level // 2 != expected_level:
+                        return False, None, f"Строка {line_num}: неправильный уровень вложенности. Ожидался уровень {expected_level}"
                     
-                    # Находим родительский вопрос
-                    while question_stack and question_stack[-1]['level'] >= level:
-                        question_stack.pop()
-                    
-                    if not question_stack:
-                        return False, None, f"Строка {line_num}: не найден родительский вопрос"
-                    
-                    parent_question = question_stack[-1]
+                    # Привязываем к последнему ответу родительского вопроса
+                    parent_level, parent_question = stack[-1]
                     if not parent_question['answers']:
                         return False, None, f"Строка {line_num}: у родительского вопроса нет ответов"
                     
-                    # Привязываем к последнему ответу родительского вопроса
-                    parent_answer = parent_question['answers'][-1]
-                    parent_answer['next_question'] = len(poll_data['questions'])
+                    last_answer = parent_question['answers'][-1]
+                    last_answer['next_question'] = len(poll_data['questions'])
                     
                     poll_data['questions'].append(new_question)
                     current_question = new_question
-                    question_stack.append(new_question)
+                    stack.append((indent_level // 2, new_question))
             
-            elif line.startswith('-'):
-                # Это ответ
+            else:  # Нечетный уровень - ответ
                 if not current_question:
                     return False, None, f"Строка {line_num}: ответ не может быть перед вопросом"
                 
-                level = 0
-                temp_line = line
-                while temp_line.startswith('-'):
-                    level += 1
-                    temp_line = temp_line[1:].lstrip()
-                
-                if level != current_question['level']:
-                    return False, None, f"Строка {line_num}: уровень ответа ({level}) должен совпадать с уровнем вопроса ({current_question['level']})"
-                
-                # Извлекаем текст ответа (в кавычках)
-                if not (temp_line.startswith('"') and temp_line.endswith('"')):
-                    return False, None, f"Строка {line_num}: текст ответа должен быть в кавычках"
-                
-                answer_text = temp_line[1:-1].strip()
-                if not answer_text:
-                    return False, None, f"Строка {line_num}: текст ответа не может быть пустым"
+                # Проверяем правильность уровня
+                expected_answer_level = stack[-1][0] if stack else 0
+                if (indent_level // 2) != expected_answer_level:
+                    return False, None, f"Строка {line_num}: неправильный уровень ответа. Ожидался уровень {expected_answer_level}"
                 
                 # Валидация текста ответа
-                if len(answer_text) > 50:
-                    return False, None, f"Строка {line_num}: текст ответа не может превышать 50 символов"
+                is_valid, error_msg = validate_answer_text(line)
+                if not is_valid:
+                    return False, None, f"Строка {line_num}: {error_msg}"
                 
-                # Проверяем дубликаты ответов в текущем вопросе
+                # Проверяем дубликаты ответов
                 existing_answers = [ans['text'] for ans in current_question['answers']]
-                if answer_text in existing_answers:
-                    return False, None, f"Строка {line_num}: ответ '{answer_text}' уже существует в этом вопросе"
+                if line in existing_answers:
+                    return False, None, f"Строка {line_num}: ответ '{line}' уже существует в этом вопросе"
                 
-                # Добавляем ответ к текущему вопросу
+                # Добавляем ответ
                 answer_data = {
-                    'text': answer_text,
-                    'next_question': None  # По умолчанию - завершение опроса
+                    'text': line,
+                    'next_question': None  # По умолчанию - завершение
                 }
                 current_question['answers'].append(answer_data)
-            
-            else:
-                return False, None, f"Строка {line_num}: неверный формат. Используйте ? для вопросов и - для ответов"
         
         if not poll_data['questions']:
             return False, None, "Не найден ни один вопрос"
@@ -313,7 +286,7 @@ def parse_poll_structure(text: str) -> Tuple[bool, Optional[Dict], str]:
         # Проверяем, что у всех вопросов есть хотя бы один ответ
         for i, question in enumerate(poll_data['questions']):
             if not question['answers']:
-                return False, None, f"Вопрос '{question['text']}' (уровень {question['level']}) не имеет ответов"
+                return False, None, f"Вопрос '{question['text']}' не имеет ответов"
         
         return True, poll_data, ""
     
@@ -327,7 +300,7 @@ async def cmd_start(message: Message):
     keyboard.button(text="📝 Создать опрос", callback_data="create_poll")
     keyboard.button(text="📋 Мои опросы", callback_data="my_polls")
     keyboard.button(text="📊 Результаты", callback_data="show_results")
-    keyboard.adjust(2)  # 2 кнопки в строке для лучшего отображения
+    keyboard.adjust(2)
     
     await message.answer(
         "Привет! Я бот для создания и проведения опросов с логическими ветвлениями.\n\n"
@@ -411,45 +384,107 @@ async def process_poll_name(message: Message, state: FSMContext):
     await state.update_data(poll_name=poll_name)
     await state.set_state(PollCreationStates.awaiting_poll_structure)
     
-    instruction = """📝 Теперь введите структуру опроса в формате:
+    instruction = """📝 Теперь введите структуру опроса с использованием отступов:
 
-? "Первый вопрос"
-- "Ответ 1"
-- "Ответ 2"
-?? "Вопрос для Ответа 1"
--- "Ответ 1.1"
--- "Ответ 1.2"
-??? "Вопрос для Ответа 1.2"
---- "Ответ 1.2.1"
-- "Ответ 3"
-
-<b>Правила:</b>
-• <code>?</code> - уровень вопроса (1 знак = 1 уровень)
-• <code>-</code> - уровень ответа (количество должно соответствовать уровню вопроса)
-• Кавычки обязательны
-• Каждый вопрос должен иметь хотя бы один ответ
-• Первый вопрос должен быть уровня 1 (<code>?</code>)
-• Максимум 10 уровней вложенности
+<b>Формат:</b>
+• Каждая строка - либо вопрос, либо ответ
+• Используйте отступы (табы или 2 пробела) для обозначения уровней
+• Вопросы и ответы чередуются по уровням
 
 <b>Пример:</b>
-<code>? "Нравится ли вам программирование?"
-- "Да"
-- "Нет"
-?? "На каком языке программируете?"
--- "Python"
--- "JavaScript"
--- "Другой"
-??? "Какой именно?"
---- "Java"
---- "C++"
---- "Другой"
-- "Затрудняюсь ответить"</code>"""
+<code>Нравится ли вам программирование?
+  Да
+    На каком языке программируете?
+      Python
+        Почему Python?
+          Простой синтаксис
+          Много библиотек
+      JavaScript
+      Другой
+  Нет
+    Почему нет?
+      Сложно
+      Не интересно
+  Затрудняюсь ответить</code>
+
+<b>Правила:</b>
+• Первая строка - корневой вопрос (без отступа)
+• Ответы делаются с отступом (2 пробела или таб)
+• Подвопросы к ответам - с двойным отступом (4 пробела или 2 таба)
+• И так далее...
+
+Можно использовать как табы, так и пробелы (рекомендуем 2 пробела на уровень)."""
 
     keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="📋 Пример структуры", callback_data="show_example")
     keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
     keyboard.button(text="❌ Отмена", callback_data="cancel")
+    keyboard.adjust(1)
     
     await message.answer(instruction, reply_markup=keyboard.as_markup())
+
+# Показать подробный пример
+@dp.callback_query(lambda c: c.data == "show_example")
+async def show_detailed_example(callback: CallbackQuery):
+    example = """<b>Подробный пример структуры:</b>
+
+<code>Как вам наш продукт?
+  Отлично
+    Что именно понравилось?
+      Дизайн
+        Что в дизайне?
+          Цветовая схема
+          Удобство интерфейса
+      Функциональность
+      Цена
+  Хорошо
+  Плохо
+    Что можно улучшить?
+      Интерфейс
+      Скорость работы
+      Добавить функции
+  Не пользовался</code>
+
+<b>Как читать отступы:</b>
+• Уровень 0: <code>Как вам наш продукт?</code> (вопрос)
+• Уровень 1: <code>  Отлично</code> (ответ)
+• Уровень 2: <code>    Что именно понравилось?</code> (подвопрос)
+• Уровень 3: <code>      Дизайн</code> (ответ на подвопрос)
+• Уровень 4: <code>        Что в дизайне?</code> (подподвопрос)
+
+И так далее..."""
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="⬅️ Назад к созданию", callback_data="back_to_creation")
+    
+    await callback.message.edit_text(example, parse_mode="HTML", reply_markup=keyboard.as_markup())
+    await callback.answer()
+
+# Назад к созданию опроса
+@dp.callback_query(lambda c: c.data == "back_to_creation")
+async def back_to_creation(callback: CallbackQuery):
+    instruction = """📝 Введите структуру опроса с использованием отступов:
+
+<b>Формат:</b>
+• Каждая строка - либо вопрос, либо ответ
+• Используйте отступы (табы или 2 пробела) для обозначения уровней
+
+<b>Пример:</b>
+<code>Нравится ли вам программирование?
+  Да
+    На каком языке программируете?
+      Python
+      JavaScript
+  Нет</code>"""
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="📋 Пример структуры", callback_data="show_example")
+    keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
+    keyboard.button(text="❌ Отмена", callback_data="cancel")
+    keyboard.adjust(1)
+    
+    await callback.message.edit_text(instruction, reply_markup=keyboard.as_markup())
+    await callback.answer()
 
 # Обработка структуры опроса
 @dp.message(PollCreationStates.awaiting_poll_structure)
@@ -457,12 +492,14 @@ async def process_poll_structure(message: Message, state: FSMContext):
     structure_text = message.text
     
     # Парсим структуру
-    success, poll_data, error_msg = parse_poll_structure(structure_text)
+    success, poll_data, error_msg = parse_poll_structure_with_indents(structure_text)
     
     if not success:
         keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="📋 Пример структуры", callback_data="show_example")
         keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
         keyboard.button(text="❌ Отмена", callback_data="cancel")
+        keyboard.adjust(1)
         
         await message.answer(
             f"❌ Ошибка разбора структуры:\n{error_msg}\n\nПопробуйте еще раз:",
@@ -586,7 +623,7 @@ async def view_poll_details(callback: CallbackQuery):
     
     build_structure(0)
     
-    # Компактная клавиатура с 2 кнопками в строке
+    # Компактная клавиатура
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="🚀 Запустить", callback_data=f"start_poll_{poll_id}")
     keyboard.button(text="📊 Результаты", callback_data=f"results_{poll_id}")

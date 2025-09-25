@@ -1,0 +1,10 @@
+services:
+  - type: worker
+    name: telegram-poll-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: API_TOKEN
+        value: 8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E

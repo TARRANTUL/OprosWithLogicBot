@@ -1,29 +1,37 @@
-import os
 import logging
+import json
+import os
+import uuid
 import asyncio
 from aiohttp import web
+from datetime import datetime
+from collections import defaultdict
+import re
+from typing import Dict, List, Tuple, Any, Optional
+
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, StateFilter
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Command, Filter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardButton, 
+    InlineKeyboardMarkup, ReplyKeyboardRemove
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # Инициализация бота
 API_TOKEN = '8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E'
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -152,14 +160,8 @@ async def cmd_start(message: Message):
 
 # Команда отмены
 @dp.message(Command("cancel"))
-@dp.callback_query(F.data == "cancel")
-async def cmd_cancel(message: Message | CallbackQuery, state: FSMContext):
-    if isinstance(message, CallbackQuery):
-        await message.message.edit_text("Действие отменено")
-        message = message.message
-    else:
-        await message.answer("Действие отменено")
-    
+async def cmd_cancel_message(message: Message, state: FSMContext):
+    await message.answer("Действие отменено")
     await state.clear()
     
     keyboard = InlineKeyboardBuilder()
@@ -169,6 +171,22 @@ async def cmd_cancel(message: Message | CallbackQuery, state: FSMContext):
     keyboard.adjust(1)
     
     await message.answer(
+        "Главное меню. Выберите действие:",
+        reply_markup=keyboard.as_markup()
+    )
+
+@dp.callback_query(lambda c: c.data == "cancel")
+async def cmd_cancel_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Действие отменено")
+    await state.clear()
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="📝 Создать опрос", callback_data="create_poll")
+    keyboard.button(text="📋 Мои опросы", callback_data="my_polls")
+    keyboard.button(text="📊 Результаты", callback_data="show_results")
+    keyboard.adjust(1)
+    
+    await callback.message.answer(
         "Главное меню. Выберите действие:",
         reply_markup=keyboard.as_markup()
     )
@@ -196,7 +214,7 @@ async def cmd_help(message: Message):
     await message.answer(help_text)
 
 # Главное меню
-@dp.callback_query(F.data == "main_menu")
+@dp.callback_query(lambda c: c.data == "main_menu")
 async def main_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     keyboard = InlineKeyboardBuilder()
@@ -212,7 +230,7 @@ async def main_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # Начало создания опроса
-@dp.callback_query(F.data == "create_poll")
+@dp.callback_query(lambda c: c.data == "create_poll")
 async def create_poll_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PollCreationStates.awaiting_poll_name)
     
@@ -256,7 +274,7 @@ async def process_poll_name(message: Message, state: FSMContext):
     )
 
 # Назад к вводу названия опроса
-@dp.callback_query(PollCreationStates.awaiting_question_text, F.data == "back_to_poll_name")
+@dp.callback_query(PollCreationStates.awaiting_question_text, lambda c: c.data == "back_to_poll_name")
 async def back_to_poll_name(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PollCreationStates.awaiting_poll_name)
     
@@ -303,7 +321,7 @@ async def process_question_text(message: Message, state: FSMContext):
     )
 
 # Назад к вводу текста вопроса
-@dp.callback_query(PollCreationStates.awaiting_answer_options, F.data == "back_to_question_text")
+@dp.callback_query(PollCreationStates.awaiting_answer_options, lambda c: c.data == "back_to_question_text")
 async def back_to_question_text(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     poll_data = data['poll_data']
@@ -384,7 +402,7 @@ async def show_next_action_menu(message: Message, state: FSMContext):
     )
 
 # Назад к вводу вариантов ответов
-@dp.callback_query(PollCreationStates.awaiting_next_action, F.data == "back_to_answer_options")
+@dp.callback_query(PollCreationStates.awaiting_next_action, lambda c: c.data == "back_to_answer_options")
 async def back_to_answer_options(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     poll_data = data['poll_data']
@@ -407,7 +425,7 @@ async def back_to_answer_options(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # Настройка действия для ответа
-@dp.callback_query(PollCreationStates.awaiting_next_action, F.data.startswith("setup_answer_"))
+@dp.callback_query(PollCreationStates.awaiting_next_action, lambda c: c.data.startswith("setup_answer_"))
 async def setup_answer_action(callback: CallbackQuery, state: FSMContext):
     ans_idx = int(callback.data.split('_')[-1])
     data = await state.get_data()
@@ -442,13 +460,13 @@ async def setup_answer_action(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # Назад к меню действий
-@dp.callback_query(F.data == "back_to_action_menu")
+@dp.callback_query(lambda c: c.data == "back_to_action_menu")
 async def back_to_action_menu(callback: CallbackQuery, state: FSMContext):
     await show_next_action_menu(callback.message, state)
     await callback.answer()
 
 # Добавление вопроса для ответа
-@dp.callback_query(PollCreationStates.awaiting_next_action, F.data.startswith("add_question_"))
+@dp.callback_query(PollCreationStates.awaiting_next_action, lambda c: c.data.startswith("add_question_"))
 async def add_question_for_answer(callback: CallbackQuery, state: FSMContext):
     ans_idx = int(callback.data.split('_')[-1])
     await state.update_data(current_answer_index=ans_idx)
@@ -503,7 +521,7 @@ async def process_new_question(message: Message, state: FSMContext):
     )
 
 # Назад от нового вопроса
-@dp.callback_query(PollCreationStates.awaiting_answer_options, F.data == "back_to_new_question")
+@dp.callback_query(PollCreationStates.awaiting_answer_options, lambda c: c.data == "back_to_new_question")
 async def back_to_new_question(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     poll_data = data['poll_data']
@@ -518,7 +536,7 @@ async def back_to_new_question(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # Завершение опроса для ответа
-@dp.callback_query(PollCreationStates.awaiting_next_action, F.data.startswith("end_poll_"))
+@dp.callback_query(PollCreationStates.awaiting_next_action, lambda c: c.data.startswith("end_poll_"))
 async def end_poll_for_answer(callback: CallbackQuery, state: FSMContext):
     ans_idx = int(callback.data.split('_')[-1])
     data = await state.get_data()
@@ -533,7 +551,7 @@ async def end_poll_for_answer(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # Добавление еще одного вопроса
-@dp.callback_query(PollCreationStates.awaiting_next_action, F.data == "add_another_question")
+@dp.callback_query(PollCreationStates.awaiting_next_action, lambda c: c.data == "add_another_question")
 async def add_another_question(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PollCreationStates.awaiting_question_text)
     
@@ -548,7 +566,7 @@ async def add_another_question(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # Завершение создания опроса
-@dp.callback_query(PollCreationStates.awaiting_next_action, F.data == "finish_poll")
+@dp.callback_query(PollCreationStates.awaiting_next_action, lambda c: c.data == "finish_poll")
 async def finish_poll_creation(callback: CallbackQuery, state: FSMContext):
     await finalize_poll_creation(callback, state)
 
@@ -600,7 +618,7 @@ async def finalize_poll_creation(callback: CallbackQuery, state: FSMContext):
     save_data()
 
 # Показать мои опросы
-@dp.callback_query(F.data == "my_polls")
+@dp.callback_query(lambda c: c.data == "my_polls")
 async def my_polls(callback: CallbackQuery):
     admin_id = callback.from_user.id
     if not admin_polls[admin_id]:
@@ -634,7 +652,7 @@ async def my_polls(callback: CallbackQuery):
     await callback.answer()
 
 # Просмотр опроса
-@dp.callback_query(F.data.startswith("view_poll_"))
+@dp.callback_query(lambda c: c.data.startswith("view_poll_"))
 async def view_poll_details(callback: CallbackQuery):
     poll_id = int(callback.data.split('_')[-1])
     if poll_id not in polls:
@@ -689,7 +707,7 @@ async def view_poll_details(callback: CallbackQuery):
     await callback.answer()
 
 # Удаление опроса
-@dp.callback_query(F.data.startswith("delete_poll_"))
+@dp.callback_query(lambda c: c.data.startswith("delete_poll_"))
 async def delete_poll(callback: CallbackQuery):
     poll_id = int(callback.data.split('_')[-1])
     admin_id = callback.from_user.id
@@ -711,7 +729,7 @@ async def delete_poll(callback: CallbackQuery):
     await callback.answer()
 
 # Подтверждение удаления опроса
-@dp.callback_query(F.data.startswith("confirm_delete_"))
+@dp.callback_query(lambda c: c.data.startswith("confirm_delete_"))
 async def confirm_delete_poll(callback: CallbackQuery):
     poll_id = int(callback.data.split('_')[-1])
     admin_id = callback.from_user.id
@@ -744,7 +762,7 @@ async def confirm_delete_poll(callback: CallbackQuery):
     await callback.answer()
 
 # Запуск опроса
-@dp.callback_query(F.data.startswith("start_poll_"))
+@dp.callback_query(lambda c: c.data.startswith("start_poll_"))
 async def start_poll(callback: CallbackQuery):
     poll_id = int(callback.data.split('_')[-1])
     if poll_id not in polls:
@@ -778,7 +796,7 @@ async def start_poll(callback: CallbackQuery):
     await callback.answer()
 
 # Обработка ответов на опрос
-@dp.callback_query(F.data.startswith("poll_"))
+@dp.callback_query(lambda c: c.data.startswith("poll_"))
 async def handle_poll_answer(callback: CallbackQuery):
     try:
         parts = callback.data.split('_')
@@ -856,7 +874,7 @@ async def handle_poll_answer(callback: CallbackQuery):
     await callback.answer()
 
 # Отмена опроса администратором
-@dp.callback_query(F.data.startswith("admin_cancel_"))
+@dp.callback_query(lambda c: c.data.startswith("admin_cancel_"))
 async def admin_cancel_poll(callback: CallbackQuery):
     poll_id = int(callback.data.split('_')[-1])
     admin_id = callback.from_user.id
@@ -876,7 +894,7 @@ async def admin_cancel_poll(callback: CallbackQuery):
     await callback.answer()
 
 # Показать результаты
-@dp.callback_query(F.data == "show_results")
+@dp.callback_query(lambda c: c.data == "show_results")
 async def show_results(callback: CallbackQuery):
     admin_id = callback.from_user.id
     if not admin_polls[admin_id]:
@@ -910,7 +928,7 @@ async def show_results(callback: CallbackQuery):
     await callback.answer()
 
 # Показать результаты конкретного опроса
-@dp.callback_query(F.data.startswith("results_"))
+@dp.callback_query(lambda c: c.data.startswith("results_"))
 async def show_poll_results(callback: CallbackQuery):
     poll_id = int(callback.data.split('_')[-1])
     if poll_id not in polls:
@@ -986,237 +1004,46 @@ async def show_poll_results(callback: CallbackQuery):
     )
     await callback.answer()
 
-# Редактирование опроса
-@dp.callback_query(F.data.startswith("edit_poll_"))
-async def edit_poll_start(callback: CallbackQuery, state: FSMContext):
-    poll_id = int(callback.data.split('_')[-1])
-    admin_id = callback.from_user.id
-    
-    if poll_id not in polls or poll_id not in admin_polls[admin_id]:
-        await callback.answer("Ошибка: опрос не найден")
-        return
-    
-    await state.set_state(PollEditStates.selecting_question)
-    await state.update_data(edit_poll_id=poll_id)
-    
-    poll = polls[poll_id]
-    keyboard = InlineKeyboardBuilder()
-    
-    for i, question in enumerate(poll['questions']):
-        keyboard.button(
-            text=f"{i+1}. {question['text'][:30]}{'...' if len(question['text']) > 30 else ''}",
-            callback_data=f"edit_question_{i}"
-        )
-    
-    keyboard.adjust(1)
-    keyboard.button(text="🔙 Назад", callback_data=f"view_poll_{poll_id}")
-    
-    await callback.message.edit_text(
-        f"Выберите вопрос для редактирования в опросе '{poll['name']}':",
-        reply_markup=keyboard.as_markup()
-    )
-    await callback.answer()
+# HTTP-сервер для Render.com
+async def handle_health_check(request):
+    """Обработчик health-check запросов от Render"""
+    return web.Response(text="Bot is running!")
 
-# Редактирование вопроса
-@dp.callback_query(PollEditStates.selecting_question, F.data.startswith("edit_question_"))
-async def edit_question(callback: CallbackQuery, state: FSMContext):
-    question_idx = int(callback.data.split('_')[-1])
-    data = await state.get_data()
-    poll_id = data['edit_poll_id']
+async def start_http_server():
+    """Запуск HTTP сервера для Render"""
+    app = web.Application()
+    app.router.add_get('/health', handle_health_check)
+    app.router.add_get('/', handle_health_check)
     
-    await state.set_state(PollEditStates.editing_question)
-    await state.update_data(edit_question_idx=question_idx)
-    
-    poll = polls[poll_id]
-    question = poll['questions'][question_idx]
-    
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="✏️ Редактировать текст", callback_data="edit_question_text")
-    keyboard.button(text="✏️ Редактировать ответы", callback_data="edit_question_answers")
-    keyboard.button(text="🔙 Назад", callback_data=f"edit_poll_{poll_id}")
-    
-    await callback.message.edit_text(
-        f"Вопрос {question_idx + 1}: {question['text']}\n\n"
-        "Что вы хотите отредактировать?",
-        reply_markup=keyboard.as_markup()
-    )
-    await callback.answer()
+    port = int(os.environ.get('PORT', 5000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"HTTP-сервер запущен на порту {port}")
+    return runner
 
-# Редактирование текста вопроса
-@dp.callback_query(PollEditStates.editing_question, F.data == "edit_question_text")
-async def edit_question_text(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    poll_id = data['edit_poll_id']
-    question_idx = data['edit_question_idx']
-    
-    poll = polls[poll_id]
-    question = poll['questions'][question_idx]
-    
-    await state.set_state(PollEditStates.editing_question)
-    await state.update_data(editing_field="question_text")
-    
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🔙 Назад", callback_data=f"edit_question_{question_idx}")
-    
-    await callback.message.edit_text(
-        f"Текущий текст вопроса: {question['text']}\n\n"
-        "Введите новый текст вопроса:",
-        reply_markup=keyboard.as_markup()
-    )
-    await callback.answer()
-
-# Редактирование ответов вопроса
-@dp.callback_query(PollEditStates.editing_question, F.data == "edit_question_answers")
-async def edit_question_answers(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    poll_id = data['edit_poll_id']
-    question_idx = data['edit_question_idx']
-    
-    poll = polls[poll_id]
-    question = poll['questions'][question_idx]
-    
-    await state.set_state(PollEditStates.editing_answers)
-    
-    # Создаем клавиатуру с ответами
-    keyboard = InlineKeyboardBuilder()
-    for i, answer in enumerate(question['answers']):
-        keyboard.button(
-            text=f"{i+1}. {answer['text']}",
-            callback_data=f"edit_answer_{i}"
-        )
-    
-    keyboard.adjust(1)
-    keyboard.button(text="➕ Добавить ответ", callback_data="add_answer")
-    keyboard.button(text="🔙 Назад", callback_data=f"edit_question_{question_idx}")
-    
-    await callback.message.edit_text(
-        f"Выберите ответ для редактирования в вопросе:\n\n{question['text']}",
-        reply_markup=keyboard.as_markup()
-    )
-    await callback.answer()
-
-# Обработка ввода нового текста вопроса
-@dp.message(PollEditStates.editing_question)
-async def process_edited_question_text(message: Message, state: FSMContext):
-    new_text = message.text.strip()
-    
-    # Валидация вопроса
-    is_valid, error_msg = validate_question_text(new_text)
-    if not is_valid:
-        await message.answer(f"❌ {error_msg}. Попробуйте еще раз:")
-        return
-    
-    data = await state.get_data()
-    poll_id = data['edit_poll_id']
-    question_idx = data['edit_question_idx']
-    
-    # Обновляем текст вопроса
-    polls[poll_id]['questions'][question_idx]['text'] = new_text
-    save_data()
-    
-    await state.set_state(PollEditStates.selecting_question)
-    
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🔙 Назад", callback_data=f"edit_poll_{poll_id}")
-    
-    await message.answer(
-        "✅ Текст вопроса успешно обновлен!",
-        reply_markup=keyboard.as_markup()
-    )
-
-# Редактирование конкретного ответа
-@dp.callback_query(PollEditStates.editing_answers, F.data.startswith("edit_answer_"))
-async def edit_specific_answer(callback: CallbackQuery, state: FSMContext):
-    answer_idx = int(callback.data.split('_')[-1])
-    data = await state.get_data()
-    poll_id = data['edit_poll_id']
-    question_idx = data['edit_question_idx']
-    
-    poll = polls[poll_id]
-    question = poll['questions'][question_idx]
-    answer = question['answers'][answer_idx]
-    
-    await state.update_data(edit_answer_idx=answer_idx)
-    await state.set_state(PollEditStates.editing_answers)
-    await state.update_data(editing_field="answer_text")
-    
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🔙 Назад", callback_data="edit_question_answers")
-    
-    await callback.message.edit_text(
-        f"Текущий текст ответа: {answer['text']}\n\n"
-        "Введите новый текст ответа:",
-        reply_markup=keyboard.as_markup()
-    )
-    await callback.answer()
-
-# Обработка ввода нового текста ответа
-@dp.message(PollEditStates.editing_answers)
-async def process_edited_answer_text(message: Message, state: FSMContext):
-    new_text = message.text.strip()
-    
-    # Валидация ответа
-    if not new_text or len(new_text) > 50:
-        await message.answer("❌ Текст ответа не может быть пустым или превышать 50 символов. Попробуйте еще раз:")
-        return
-    
-    data = await state.get_data()
-    poll_id = data['edit_poll_id']
-    question_idx = data['edit_question_idx']
-    answer_idx = data['edit_answer_idx']
-    
-    # Обновляем текст ответа
-    polls[poll_id]['questions'][question_idx]['answers'][answer_idx]['text'] = new_text
-    save_data()
-    
-    await state.set_state(PollEditStates.editing_answers)
-    
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🔙 Назад", callback_data="edit_question_answers")
-    
-    await message.answer(
-        "✅ Текст ответа успешно обновлен!",
-        reply_markup=keyboard.as_markup()
-    )
-
-# Добавление нового ответа
-@dp.callback_query(PollEditStates.editing_answers, F.data == "add_answer")
-async def add_new_answer(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    poll_id = data['edit_poll_id']
-    question_idx = data['edit_question_idx']
-    
-    poll = polls[poll_id]
-    question = poll['questions'][question_idx]
-    
-    # Добавляем новый ответ
-    question['answers'].append({
-        'text': "Новый ответ",
-        'next_question': None
-    })
-    save_data()
-    
-    await state.update_data(edit_answer_idx=len(question['answers']) - 1)
-    await state.set_state(PollEditStates.editing_answers)
-    await state.update_data(editing_field="answer_text")
-    
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🔙 Назад", callback_data="edit_question_answers")
-    
-    await callback.message.edit_text(
-        "Введите текст для нового ответа:",
-        reply_markup=keyboard.as_markup()
-    )
-    await callback.answer()
-
-# Запуск бота
 async def main():
+    """Основная функция запуска"""
+    logger.info("=== Запуск бота для создания опросов с логическими ветвлениями ===")
+    
     # Загружаем данные при запуске
     load_data()
     
-    # Запускаем бота
-    await dp.start_polling(bot)
+    try:
+        # Запускаем HTTP сервер
+        http_runner = await start_http_server()
+        
+        # Запускаем бота
+        logger.info("Запуск polling бота...")
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
+        raise
+    finally:
+        await bot.session.close()
+        logger.info("Бот остановлен")
 
-if __name__ == "__main__":
-    import asyncio
+if __name__ == '__main__':
     asyncio.run(main())

@@ -1,3 +1,4 @@
+```python
 import logging
 import json
 import os
@@ -191,10 +192,14 @@ def parse_poll_structure_by_spaces(text: str) -> Tuple[bool, Optional[Dict], str
             content = line[space_count:]
             normalized_lines.append((level, content, i + 1))
         
+        if not normalized_lines:
+            return False, None, "Нет данных для обработки"
+        
+        if not normalized_lines[0][1].endswith('?'):
+            return False, None, f"Строка {normalized_lines[0][2]}: первая строка должна быть вопросом (с ? в конце)"
+        
         poll_data = {'questions': []}
-        stack = []
-        current_question = None
-        last_answer = None
+        question_stack = []  # Стек для отслеживания вопросов и их уровней
         
         for level, content, line_num in normalized_lines:
             is_question = content.endswith('?')
@@ -214,44 +219,68 @@ def parse_poll_structure_by_spaces(text: str) -> Tuple[bool, Optional[Dict], str
                     if poll_data['questions']:
                         return False, None, f"Строка {line_num}: может быть только один корневой вопрос (без пробелов)"
                     poll_data['questions'].append(new_question)
-                    current_question = new_question
-                    stack = [(0, new_question)]
-                    last_answer = None
+                    question_stack = [(0, len(poll_data['questions']) - 1)]
                 else:
-                    if not last_answer:
-                        return False, None, f"Строка {line_num}: вопрос должен следовать после ответа"
+                    # Найти родительский вопрос
+                    parent_idx = -1
+                    for i in range(len(question_stack) - 1, -1, -1):
+                        parent_level, parent_q_idx = question_stack[i]
+                        if parent_level == level - 1:
+                            parent_idx = parent_q_idx
+                            break
                     
-                    if level != last_answer['level'] + 1:
-                        return False, None, f"Строка {line_num}: неправильный уровень вложенности. Ожидался уровень {last_answer['level'] + 1}"
+                    if parent_idx == -1:
+                        return False, None, f"Строка {line_num}: неправильный уровень вложенности. Нет родительского вопроса для уровня {level}"
                     
-                    last_answer['next_question'] = len(poll_data['questions'])
+                    # Найти последний ответ на родительский вопрос с уровнем level-1
+                    parent_question = poll_data['questions'][parent_idx]
+                    last_answer_idx = -1
+                    for i in range(len(parent_question['answers']) - 1, -1, -1):
+                        if parent_question['answers'][i]['level'] == level - 1:
+                            last_answer_idx = i
+                            break
+                    
+                    if last_answer_idx == -1:
+                        return False, None, f"Строка {line_num}: невозможно привязать вопрос к ответу - нет подходящего ответа на родительский вопрос"
+                    
+                    # Привязать вопрос к найденному ответу
+                    parent_question['answers'][last_answer_idx]['next_question'] = len(poll_data['questions'])
                     poll_data['questions'].append(new_question)
-                    current_question = new_question
-                    stack.append((level, new_question))
-                    last_answer = None
-                
+                    question_stack = [(l, idx) for l, idx in question_stack if l < level] + [(level, len(poll_data['questions']) - 1)]
+            
             else:
-                if not current_question:
-                    return False, None, f"Строка {line_num}: ответ не может быть перед вопросом"
-                
                 is_valid, error_msg = validate_answer_text(content)
                 if not is_valid:
                     return False, None, f"Строка {line_num}: {error_msg}"
                 
-                if level != current_question['level']:
-                    return False, None, f"Строка {line_num}: неправильный уровень ответа. Ожидался уровень {current_question['level']}"
+                # Найти вопрос, которому принадлежит этот ответ
+                parent_idx = -1
+                for i in range(len(question_stack) - 1, -1, -1):
+                    parent_level, parent_q_idx = question_stack[i]
+                    if parent_level == level:
+                        parent_idx = parent_q_idx
+                        break
                 
-                existing_answers = [ans['text'] for ans in current_question['answers']]
+                if parent_idx == -1:
+                    return False, None, f"Строка {line_num}: нет родительского вопроса для ответа '{content}'"
+                
+                parent_question = poll_data['questions'][parent_idx]
+                
+                # Проверить, что уровень ответа соответствует уровню вопроса
+                if level != parent_question['level']:
+                    return False, None, f"Строка {line_num}: уровень ответа {level} не соответствует уровню вопроса {parent_question['level']}"
+                
+                # Проверить уникальность ответа
+                existing_answers = [ans['text'] for ans in parent_question['answers']]
                 if content in existing_answers:
-                    return False, None, f"Строка {line_num}: ответ '{content}' уже существует в этом вопросе"
+                    return False, None, f"Строка {line_num}: ответ '{content}' уже существует в вопросе '{parent_question['text']}'"
                 
                 answer_data = {
                     'text': content,
                     'next_question': None,
                     'level': level
                 }
-                current_question['answers'].append(answer_data)
-                last_answer = answer_data
+                parent_question['answers'].append(answer_data)
         
         if not poll_data['questions']:
             return False, None, "Не найден ни один вопрос"

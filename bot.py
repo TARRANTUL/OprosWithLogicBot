@@ -1,4 +1,4 @@
-```python
+python
 import logging
 import json
 import os

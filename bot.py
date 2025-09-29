@@ -38,6 +38,7 @@ poll_id_counter = 1
 admin_polls = defaultdict(list)
 poll_results = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 user_progress = {}
+active_polls = {}  # Словарь для отслеживания активных опросов в чатах: {chat_id: poll_id}
 
 polling_lock = asyncio.Lock()
 
@@ -673,10 +674,145 @@ async def view_poll_details(callback: CallbackQuery):
         details += "\n"
     
     keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🚀 Начать опрос", callback_data=f"start_poll_{poll_id}")
     keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
     keyboard.button(text="📋 Мои опросы", callback_data="my_polls")
     
     await callback.message.edit_text(details, parse_mode="HTML", reply_markup=keyboard.as_markup())
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("start_poll_"))
+async def start_poll_in_chat(callback: CallbackQuery):
+    poll_id = int(callback.data.split("_")[2])
+    poll = polls.get(poll_id)
+    
+    if not poll:
+        await callback.message.edit_text(
+            "Опрос не найден.",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="🏠 Главное меню", callback_data="main_menu")
+                .as_markup()
+        )
+        await callback.answer()
+        return
+    
+    chat_id = callback.message.chat.id
+    
+    # Проверяем, что это группа
+    if callback.message.chat.type not in ['group', 'supergroup']:
+        await callback.message.edit_text(
+            "❌ Опрос можно начать только в группе!",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="🏠 Главное меню", callback_data="main_menu")
+                .as_markup()
+        )
+        await callback.answer()
+        return
+    
+    # Проверяем права администратора
+    try:
+        member = await bot.get_chat_member(chat_id, callback.from_user.id)
+        if not member.status in ['administrator', 'creator']:
+            await callback.message.edit_text(
+                "❌ Для начала опроса вы должны быть администратором группы!",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="🏠 Главное меню", callback_data="main_menu")
+                    .as_markup()
+            )
+            await callback.answer()
+            return
+    except Exception:
+        await callback.message.edit_text(
+            "❌ Не удалось проверить права администратора.",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="🏠 Главное меню", callback_data="main_menu")
+                .as_markup()
+        )
+        await callback.answer()
+        return
+    
+    # Начинаем опрос в чате
+    active_polls[chat_id] = poll_id
+    
+    # Сохраняем прогресс пользователей в этом чате
+    if chat_id not in user_progress:
+        user_progress[chat_id] = {}
+    
+    # Отправляем первый вопрос
+    first_question = poll['questions'][0]
+    keyboard = InlineKeyboardBuilder()
+    for answer in first_question['answers']:
+        keyboard.button(text=answer['text'], callback_data=f"poll_{poll_id}_0_{answer['text']}")
+    
+    await callback.message.edit_text(
+        f"<b>Опрос начался!</b>\n\n{first_question['text']}",
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup()
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("poll_"))
+async def handle_poll_answer(callback: CallbackQuery):
+    # Формат: poll_{poll_id}_{question_idx}_{answer_text}
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        await callback.answer("Неверный формат данных", show_alert=True)
+        return
+    
+    poll_id = int(parts[1])
+    question_idx = int(parts[2])
+    answer_text = "_".join(parts[3:])  # Собираем текст ответа, т.к. он может содержать _
+    
+    poll = polls.get(poll_id)
+    if not poll:
+        await callback.answer("Опрос не найден", show_alert=True)
+        return
+    
+    # Обновляем результаты
+    poll_results[poll_id][question_idx][answer_text] += 1
+    
+    # Обновляем прогресс пользователя
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+    
+    if chat_id not in user_progress:
+        user_progress[chat_id] = {}
+    
+    if user_id not in user_progress[chat_id]:
+        user_progress[chat_id][user_id] = {'current_poll': poll_id, 'answers': {}}
+    
+    user_progress[chat_id][user_id]['answers'][question_idx] = answer_text
+    
+    # Находим следующий вопрос
+    current_question = poll['questions'][question_idx]
+    next_question_idx = None
+    
+    # Найти индекс ответа, чтобы определить next_question
+    for answer in current_question['answers']:
+        if answer['text'] == answer_text:
+            next_question_idx = answer.get('next_question')
+            break
+    
+    if next_question_idx is not None and next_question_idx < len(poll['questions']):
+        # Отправляем следующий вопрос
+        next_question = poll['questions'][next_question_idx]
+        keyboard = InlineKeyboardBuilder()
+        for answer in next_question['answers']:
+            keyboard.button(text=answer['text'], callback_data=f"poll_{poll_id}_{next_question_idx}_{answer['text']}")
+        
+        await callback.message.edit_text(
+            f"{next_question['text']}",
+            parse_mode="HTML",
+            reply_markup=keyboard.as_markup()
+        )
+    else:
+        # Опрос завершен для этого пользователя
+        await callback.message.edit_text(
+            "✅ Спасибо за участие в опросе!",
+            parse_mode="HTML"
+        )
+    
+    save_data()
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "show_results")

@@ -19,7 +19,6 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, TelegramConflictError
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,26 +26,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Глобальная переменная для отслеживания состояния бота
 bot_instance_running = False
 
-# Инициализация бота
 API_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8400306221:AAGk7HnyDytn8ymhqTqNWZI8KtxW6CChb-E')
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Глобальные хранилища данных
 polls = {}
 poll_id_counter = 1
 admin_polls = defaultdict(list)
 poll_results = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 user_progress = {}
 
-# Блокировка для избежания конфликтов
 polling_lock = asyncio.Lock()
 
-# Обработчики сигналов для корректного завершения
 def signal_handler(signum, frame):
     global bot_instance_running
     logger.info(f"Получен сигнал {signum}, завершаем работу...")
@@ -59,12 +53,10 @@ async def shutdown():
     save_data()
     logger.info("Бот успешно завершил работу")
 
-# Состояния для создания опроса
 class PollCreationStates(StatesGroup):
     awaiting_poll_name = State()
     awaiting_poll_structure = State()
 
-# Загрузка данных из файла
 def load_data():
     global polls, admin_polls, poll_results, poll_id_counter
     
@@ -92,7 +84,6 @@ def load_data():
     except Exception as e:
         logger.error(f"Ошибка загрузки данных: {e}")
 
-# Сохранение данных в файл
 def save_data():
     try:
         data = {
@@ -115,7 +106,6 @@ def save_data():
     except Exception as e:
         logger.error(f"Ошибка сохранения данных: {e}")
 
-# Улучшенная функция для обработки конфликтов
 async def safe_polling():
     global bot_instance_running
     
@@ -161,7 +151,6 @@ async def safe_polling():
             logger.error(f"Неожиданная ошибка: {e}")
             break
 
-# Валидация
 def validate_poll_name(name: str) -> Tuple[bool, str]:
     if not name or not name.strip():
         return False, "Название опроса не может быть пустым"
@@ -183,81 +172,66 @@ def validate_answer_text(text: str) -> Tuple[bool, str]:
         return False, "Текст ответа не может превышать 50 символов"
     return True, ""
 
-# Улучшенный парсер структуры опроса с использованием отступов
-def parse_poll_structure_with_indents(text: str) -> Tuple[bool, Optional[Dict], str]:
-    """
-    Парсит структуру опроса из текста с отступами (табы или пробелы)
-    Возвращает: (успех, данные_опроса, сообщение_об_ошибке)
-    """
+def parse_poll_structure_by_spaces(text: str) -> Tuple[bool, Optional[Dict], str]:
     try:
         lines = [line.rstrip() for line in text.split('\n') if line.strip()]
         if not lines:
             return False, None, "Структура опроса не может быть пустой"
         
-        # Нормализуем отступы: заменяем табы на 2 пробела
         normalized_lines = []
         for i, line in enumerate(lines):
-            # Заменяем табы на 2 пробела
-            line = line.replace('\t', '  ')
+            line = line.replace('\t', ' ')
             
-            # Определяем уровень вложенности по отступам
-            indent_level = 0
-            stripped_line = line.lstrip()
-            indent_str = line[:len(line) - len(stripped_line)]
+            space_count = 0
+            for char in line:
+                if char == ' ':
+                    space_count += 1
+                else:
+                    break
             
-            # Подсчитываем пробелы (2 пробела = 1 уровень)
-            space_count = len(indent_str)
-            if space_count % 2 != 0:
-                return False, None, f"Строка {i+1}: неправильный отступ. Используйте 2, 4, 6... пробелов"
-            
-            indent_level = space_count // 2
-            normalized_lines.append((indent_level, stripped_line, i + 1))
+            level = space_count
+            content = line[space_count:]
+            normalized_lines.append((level, content, i + 1))
         
         poll_data = {'questions': []}
-        stack = []  # Стек для отслеживания текущей позиции в дереве
+        stack = []
         current_question = None
+        last_answer_level = -1
         
-        for indent_level, line, line_num in normalized_lines:
-            # Определяем, является ли строка вопросом или ответом
-            is_question = (indent_level % 2 == 0)
+        for level, content, line_num in normalized_lines:
+            is_question = content.endswith('?')
             
             if is_question:
-                # Это вопрос
-                # Валидация текста вопроса
-                is_valid, error_msg = validate_question_text(line)
+                is_valid, error_msg = validate_question_text(content)
                 if not is_valid:
                     return False, None, f"Строка {line_num}: {error_msg}"
                 
                 new_question = {
-                    'text': line,
+                    'text': content,
                     'answers': [],
-                    'level': indent_level // 2
+                    'level': level
                 }
                 
-                if indent_level == 0:  # Корневой вопрос
+                if level == 0:
                     if poll_data['questions']:
-                        return False, None, f"Строка {line_num}: может быть только один корневой вопрос (без отступа)"
+                        return False, None, f"Строка {line_num}: может быть только один корневой вопрос (без пробелов)"
                     poll_data['questions'].append(new_question)
                     current_question = new_question
-                    stack = [(0, new_question)]  # (уровень, вопрос)
+                    stack = [(0, new_question)]
                 else:
-                    # Подвопрос - должен следовать после ответа
-                    expected_level = (indent_level // 2)
                     if not stack:
                         return False, None, f"Строка {line_num}: нет родительского вопроса"
                     
-                    # Находим подходящего родителя
-                    while stack and stack[-1][0] >= expected_level:
+                    while stack and stack[-1][0] >= level:
                         stack.pop()
                     
                     if not stack:
                         return False, None, f"Строка {line_num}: не найден родительский вопрос"
                     
                     parent_level, parent_question = stack[-1]
-                    if expected_level != parent_level + 1:
+                    if level != parent_level + 1:
                         return False, None, f"Строка {line_num}: неправильный уровень вложенности. Ожидался уровень {parent_level + 1}"
                     
-                    # Привязываем к последнему ответу родительского вопроса
                     if not parent_question['answers']:
                         return False, None, f"Строка {line_num}: у родительского вопроса нет ответов"
                     
@@ -266,40 +240,35 @@ def parse_poll_structure_with_indents(text: str) -> Tuple[bool, Optional[Dict], 
                     
                     poll_data['questions'].append(new_question)
                     current_question = new_question
-                    stack.append((expected_level, new_question))
-            
-            else:  # Ответ
+                    stack.append((level, new_question))
+                
+                last_answer_level = -1
+                
+            else:
                 if not current_question:
                     return False, None, f"Строка {line_num}: ответ не может быть перед вопросом"
                 
-                # Проверяем правильность уровня
-                expected_answer_level = (indent_level // 2) + 1  # Уровень ответа
-                current_question_level = current_question['level']
-                
-                if expected_answer_level != current_question_level:
-                    return False, None, f"Строка {line_num}: неправильный уровень ответа. Ожидался уровень {current_question_level}"
-                
-                # Валидация текста ответа
-                is_valid, error_msg = validate_answer_text(line)
+                is_valid, error_msg = validate_answer_text(content)
                 if not is_valid:
                     return False, None, f"Строка {line_num}: {error_msg}"
                 
-                # Проверяем дубликаты ответов
-                existing_answers = [ans['text'] for ans in current_question['answers']]
-                if line in existing_answers:
-                    return False, None, f"Строка {line_num}: ответ '{line}' уже существует в этом вопросе"
+                if level != current_question['level'] + 1:
+                    return False, None, f"Строка {line_num}: неправильный уровень ответа. Ожидался уровень {current_question['level'] + 1}"
                 
-                # Добавляем ответ
+                existing_answers = [ans['text'] for ans in current_question['answers']]
+                if content in existing_answers:
+                    return False, None, f"Строка {line_num}: ответ '{content}' уже существует в этом вопросе"
+                
                 answer_data = {
-                    'text': line,
-                    'next_question': None  # По умолчанию - завершение
+                    'text': content,
+                    'next_question': None
                 }
                 current_question['answers'].append(answer_data)
+                last_answer_level = level
         
         if not poll_data['questions']:
             return False, None, "Не найден ни один вопрос"
         
-        # Проверяем, что у всех вопросов есть хотя бы один ответ
         for i, question in enumerate(poll_data['questions']):
             if not question['answers']:
                 return False, None, f"Вопрос '{question['text']}' не имеет ответов"
@@ -309,7 +278,6 @@ def parse_poll_structure_with_indents(text: str) -> Tuple[bool, Optional[Dict], 
     except Exception as e:
         return False, None, f"Ошибка разбора структуры: {str(e)}"
 
-# Команда старт
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     keyboard = InlineKeyboardBuilder()
@@ -324,7 +292,6 @@ async def cmd_start(message: Message):
         reply_markup=keyboard.as_markup()
     )
 
-# Команда отмены
 @dp.message(Command("cancel"))
 async def cmd_cancel_message(message: Message, state: FSMContext):
     await state.clear()
@@ -355,7 +322,6 @@ async def cmd_cancel_callback(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard.as_markup()
     )
 
-# Главное меню
 @dp.callback_query(lambda c: c.data == "main_menu")
 async def main_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -372,7 +338,6 @@ async def main_menu(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# Начало создания опроса
 @dp.callback_query(lambda c: c.data == "create_poll")
 async def create_poll_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PollCreationStates.awaiting_poll_name)
@@ -387,7 +352,6 @@ async def create_poll_start(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# Обработка названия опроса и запрос структуры
 @dp.message(PollCreationStates.awaiting_poll_name)
 async def process_poll_name(message: Message, state: FSMContext):
     poll_name = message.text.strip()
@@ -400,34 +364,28 @@ async def process_poll_name(message: Message, state: FSMContext):
     await state.update_data(poll_name=poll_name)
     await state.set_state(PollCreationStates.awaiting_poll_structure)
     
-    instruction = """📝 Теперь введите структуру опроса с использованием отступов:
+    instruction = """📝 Теперь введите структуру опроса с использованием пробелов:
 
-<b>Правильный формат для вашего примера:</b>
-
-<code>Нравится ли вам программирование?
-  Да
-    На каком языке программируете?
-      Python
-        Почему Python?
-          Простой синтаксис
-          Много библиотек
-      JavaScript
-      Другой
-  Нет
-    Почему нет?
-      Сложно
-      Не интересно
-  Затрудняюсь ответить</code>
-
-<b>Ключевые правила:</b>
-• Первая строка - корневой вопрос (без отступа)
-• Ответы - 2 пробела
-• Подвопросы к ответам - 4 пробела
-• Ответы на подвопросы - 6 пробелов
+<b>Правила форматирования:</b>
+• Вопросы определяются по знаку ? на конце
+• Без пробелов - корневой вопрос и ответы первого уровня
+• 1 пробел - вопросы и ответы второго уровня  
+• 2 пробела - вопросы и ответы третьего уровня
 • И так далее...
 
-<b>Ошибка в вашем вводе:</b>
-Вы использовали неправильные отступы. Следуйте примеру выше."""
+<b>Пример:</b>
+<code>Возьмем ли фокусника?
+Да
+ какого?
+  Витю
+  Сашу
+Нет</code>
+
+<b>Разбор примера:</b>
+• "Возьмем ли фокусника?" - корневой вопрос (0 пробелов)
+• "Да", "Нет" - ответы первого уровня (0 пробелов)
+• " какого?" - вопрос второго уровня (1 пробел, привязан к ответу "Да")
+• "  Витю", "  Сашу" - ответы третьего уровня (2 пробела, привязаны к вопросу "какого?")"""
 
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="📋 Подробный пример", callback_data="show_detailed_example")
@@ -438,52 +396,35 @@ async def process_poll_name(message: Message, state: FSMContext):
     
     await message.answer(instruction, reply_markup=keyboard.as_markup())
 
-# Показать подробный пример
 @dp.callback_query(lambda c: c.data == "show_detailed_example")
 async def show_detailed_example(callback: CallbackQuery):
     example = """<b>Подробный разбор формата:</b>
 
-<code>Корневой вопрос (0 пробелов)
-  Ответ 1 (2 пробела)
-    Подвопрос 1 (4 пробела)
-      Ответ 1.1 (6 пробелов)
-      Ответ 1.2 (6 пробелов)
-    Подвопрос 2 (4 пробела)
-      Ответ 2.1 (6 пробелов)
-  Ответ 2 (2 пробела)
-    Подвопрос 3 (4 пробела)
-      Ответ 3.1 (6 пробелов)
-  Ответ 3 (2 пробела)</code>
+<code>Корневой вопрос? (0 пробелов)
+Ответ1 (0 пробелов)
+Ответ2 (0 пробелов)
+ Вопрос2? (1 пробел - привязан к Ответ1)
+  Ответ2.1 (2 пробела)
+  Ответ2.2 (2 пробела)
+   Вопрос3? (3 пробела - привязан к Ответ2.1)
+    Ответ3.1 (4 пробела)
+Ответ3 (0 пробелов)</code>
 
 <b>Как исправить ваш пример:</b>
 
 <code>Нравится ли вам программирование?
-  Да
-    На каком языке программируете?
-      Python
-        Почему Python?
-          Простой синтаксис
-          Много библиотек
-      JavaScript
-      Другой
-  Нет
-    Почему нет?
-      Сложно
-      Не интересно
-  Затрудняюсь ответить</code>
-
-<b>Вместо:</b>
-<code>Накажи языке программируете?
-Python
-Почему Python?
-Простой синтаксис
-Много библиотек
-JavaScript
-Другой
+Да
+ На каком языке программируете?
+  Python
+   Почему Python?
+    Простой синтаксис
+    Много библиотек
+  JavaScript
+  Другой
 Нет
-Почему нет?
-Сложно
-Не интересно
+ Почему нет?
+  Сложно
+  Не интересно
 Затрудняюсь ответить</code>"""
 
     keyboard = InlineKeyboardBuilder()
@@ -493,23 +434,22 @@ JavaScript
     await callback.message.edit_text(example, parse_mode="HTML", reply_markup=keyboard.as_markup())
     await callback.answer()
 
-# Использовать пример
 @dp.callback_query(lambda c: c.data == "use_this_example")
 async def use_this_example(callback: CallbackQuery, state: FSMContext):
     example_text = """Нравится ли вам программирование?
-  Да
-    На каком языке программируете?
-      Python
-        Почему Python?
-          Простой синтаксис
-          Много библиотек
-      JavaScript
-      Другой
-  Нет
-    Почему нет?
-      Сложно
-      Не интересно
-  Затрудняюсь ответить"""
+Да
+ На каком языке программируете?
+  Python
+   Почему Python?
+    Простой синтаксис
+    Много библиотек
+  JavaScript
+  Другой
+Нет
+ Почему нет?
+  Сложно
+  Не интересно
+Затрудняюсь ответить"""
 
     await state.update_data(example_text=example_text)
     
@@ -525,14 +465,12 @@ async def use_this_example(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# Применить пример
 @dp.callback_query(lambda c: c.data == "apply_example")
 async def apply_example(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     example_text = data.get('example_text', '')
     
-    # Обрабатываем структуру как если бы пользователь ввел ее
-    success, poll_data, error_msg = parse_poll_structure_with_indents(example_text)
+    success, poll_data, error_msg = parse_poll_structure_by_spaces(example_text)
     
     if not success:
         await callback.message.edit_text(
@@ -544,7 +482,6 @@ async def apply_example(callback: CallbackQuery, state: FSMContext):
     poll_name = data['poll_name']
     poll_data['name'] = poll_name
     
-    # Сохраняем опрос
     global poll_id_counter
     poll_id = poll_id_counter
     poll_id_counter += 1
@@ -555,7 +492,6 @@ async def apply_example(callback: CallbackQuery, state: FSMContext):
     
     await state.clear()
     
-    # Показываем результат
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="📋 Мои опросы", callback_data="my_polls")
     keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
@@ -568,17 +504,16 @@ async def apply_example(callback: CallbackQuery, state: FSMContext):
     save_data()
     await callback.answer()
 
-# Попробовать с примером
 @dp.callback_query(lambda c: c.data == "try_with_example")
 async def try_with_example(callback: CallbackQuery, state: FSMContext):
     example_text = """Нравится ли вам программирование?
-  Да
-    На каком языке программируете?
-      Python
-      JavaScript
-      Другой
-  Нет
-  Затрудняюсь ответить"""
+Да
+ На каком языке программируете?
+  Python
+  JavaScript
+  Другой
+Нет
+Затрудняюсь ответить"""
 
     await state.update_data(example_text=example_text)
     
@@ -595,14 +530,13 @@ async def try_with_example(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# Назад к созданию
 @dp.callback_query(lambda c: c.data == "back_to_creation")
 async def back_to_creation(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     poll_name = data.get('poll_name', '')
     
     instruction = f"Продолжаем создание опроса: <b>{poll_name}</b>\n\n"
-    instruction += "Введите структуру опроса с отступами:"
+    instruction += "Введите структуру опроса с пробелами:"
     
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="📋 Подробный пример", callback_data="show_detailed_example")
@@ -614,30 +548,26 @@ async def back_to_creation(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(instruction, parse_mode="HTML", reply_markup=keyboard.as_markup())
     await callback.answer()
 
-# Обработка структуры опроса
 @dp.message(PollCreationStates.awaiting_poll_structure)
 async def process_poll_structure(message: Message, state: FSMContext):
     structure_text = message.text
     
-    # Парсим структуру
-    success, poll_data, error_msg = parse_poll_structure_with_indents(structure_text)
+    success, poll_data, error_msg = parse_poll_structure_by_spaces(structure_text)
     
     if not success:
-        # Показываем конкретную помощь по ошибке
         help_text = f"❌ {error_msg}\n\n"
         
-        if "отступ" in error_msg.lower():
-            help_text += "<b>Помощь по отступам:</b>\n"
-            help_text += "• Корневой вопрос - без отступа\n"
-            help_text += "• Ответы - 2 пробела\n"
-            help_text += "• Подвопросы - 4 пробела\n"
-            help_text += "• Ответы на подвопросы - 6 пробелов\n"
-        elif "уровень" in error_msg.lower():
+        if "отступ" in error_msg.lower() or "уровен" in error_msg.lower():
             help_text += "<b>Помощь по уровням:</b>\n"
-            help_text += "Следуйте структуре: вопрос → ответы → подвопросы → ответы\n"
+            help_text += "• Корневой вопрос - без пробелов\n"
+            help_text += "• Ответы первого уровня - без пробелов\n"
+            help_text += "• Вопросы второго уровня - 1 пробел\n"
+            help_text += "• Ответы второго уровня - 1 пробел\n"
+            help_text += "• Вопросы третьего уровня - 2 пробела\n"
+            help_text += "• И так далее...\n"
         
         help_text += "\n<b>Пример правильного формата:</b>\n"
-        help_text += "<code>Главный вопрос\n  Ответ 1\n    Подвопрос 1\n      Ответ 1.1\n  Ответ 2</code>"
+        help_text += "<code>Главный вопрос?\nОтвет1\nОтвет2\n Вопрос2?\n  Ответ2.1\n  Ответ2.2</code>"
         
         keyboard = InlineKeyboardBuilder()
         keyboard.button(text="📋 Подробный пример", callback_data="show_detailed_example")
@@ -649,12 +579,10 @@ async def process_poll_structure(message: Message, state: FSMContext):
         await message.answer(help_text, parse_mode="HTML", reply_markup=keyboard.as_markup())
         return
     
-    # Получаем название опроса из состояния
     data = await state.get_data()
     poll_name = data['poll_name']
     poll_data['name'] = poll_name
     
-    # Сохраняем опрос
     global poll_id_counter
     poll_id = poll_id_counter
     poll_id_counter += 1
@@ -665,7 +593,6 @@ async def process_poll_structure(message: Message, state: FSMContext):
     
     await state.clear()
     
-    # Показываем результат
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="📋 Мои опросы", callback_data="my_polls")
     keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
@@ -677,9 +604,6 @@ async def process_poll_structure(message: Message, state: FSMContext):
     await message.answer(structure_info, parse_mode="HTML", reply_markup=keyboard.as_markup())
     save_data()
 
-# ... остальной код остается таким же, как в предыдущем сообщении ...
-
-# HTTP-сервер для Render.com
 async def handle_health_check(request):
     return web.Response(text="Bot is running!")
 

@@ -336,6 +336,7 @@ async def cmd_cancel_callback(callback: CallbackQuery, state: FSMContext):
         "Действие отменено. Главное меню:",
         reply_markup=keyboard.as_markup()
     )
+    await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "main_menu")
 async def main_menu(callback: CallbackQuery, state: FSMContext):
@@ -613,6 +614,108 @@ async def process_poll_structure(message: Message, state: FSMContext):
     
     await message.answer(structure_info, parse_mode="HTML", reply_markup=keyboard.as_markup())
     save_data()
+
+@dp.callback_query(lambda c: c.data == "my_polls")
+async def show_my_polls(callback: CallbackQuery):
+    admin_id = callback.from_user.id
+    user_polls = admin_polls[admin_id]
+    
+    if not user_polls:
+        await callback.message.edit_text(
+            "У вас пока нет созданных опросов.",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="🏠 Главное меню", callback_data="main_menu")
+                .as_markup()
+        )
+        await callback.answer()
+        return
+    
+    keyboard = InlineKeyboardBuilder()
+    for poll_id in user_polls:
+        poll = polls.get(poll_id)
+        if poll:
+            keyboard.button(text=f"📊 {poll['name']}", callback_data=f"view_poll_{poll_id}")
+    
+    keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
+    keyboard.adjust(1)
+    
+    await callback.message.edit_text(
+        "Ваши опросы:",
+        reply_markup=keyboard.as_markup()
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("view_poll_"))
+async def view_poll_details(callback: CallbackQuery):
+    poll_id = int(callback.data.split("_")[2])
+    poll = polls.get(poll_id)
+    
+    if not poll:
+        await callback.message.edit_text(
+            "Опрос не найден.",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="🏠 Главное меню", callback_data="main_menu")
+                .as_markup()
+        )
+        await callback.answer()
+        return
+    
+    details = f"<b>Опрос: {poll['name']}</b>\n"
+    details += f"<b>ID:</b> {poll_id}\n\n"
+    
+    for i, question in enumerate(poll['questions']):
+        details += f"<b>Вопрос {i+1}:</b> {question['text']}\n"
+        details += f"<b>Уровень:</b> {question['level']}\n"
+        details += f"<b>Ответы:</b>\n"
+        for answer in question['answers']:
+            next_q = answer.get('next_question', 'нет')
+            details += f"  - {answer['text']} (след. вопрос: {next_q})\n"
+        details += "\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
+    keyboard.button(text="📋 Мои опросы", callback_data="my_polls")
+    
+    await callback.message.edit_text(details, parse_mode="HTML", reply_markup=keyboard.as_markup())
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "show_results")
+async def show_results(callback: CallbackQuery):
+    admin_id = callback.from_user.id
+    user_polls = admin_polls[admin_id]
+    
+    if not user_polls:
+        await callback.message.edit_text(
+            "У вас пока нет созданных опросов.",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="🏠 Главное меню", callback_data="main_menu")
+                .as_markup()
+        )
+        await callback.answer()
+        return
+    
+    results_text = "<b>Результаты ваших опросов:</b>\n\n"
+    
+    for poll_id in user_polls:
+        poll = polls.get(poll_id)
+        if not poll:
+            continue
+            
+        results_text += f"<b>{poll['name']} (ID: {poll_id})</b>\n"
+        
+        for q_idx, question in enumerate(poll['questions']):
+            results_text += f"\n  <b>Вопрос {q_idx+1}:</b> {question['text']}\n"
+            for answer_text, count in poll_results[poll_id][q_idx].items():
+                results_text += f"    - {answer_text}: {count}\n"
+        
+        results_text += "\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🏠 Главное меню", callback_data="main_menu")
+    keyboard.button(text="📋 Мои опросы", callback_data="my_polls")
+    
+    await callback.message.edit_text(results_text, parse_mode="HTML", reply_markup=keyboard.as_markup())
+    await callback.answer()
 
 async def handle_health_check(request):
     return web.Response(text="Bot is running!")

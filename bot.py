@@ -26,6 +26,9 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramRetryAfter, TelegramAPIError
 
+# Добавляем импорт для HTTP-сервера
+from aiohttp import web
+
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -906,6 +909,27 @@ async def show_results(callback: CallbackQuery):
     await callback.message.edit_text(results_text, parse_mode="HTML", reply_markup=keyboard.as_markup())
     await callback.answer()
 
+# --- Добавленный код для HTTP-сервера ---
+async def handle_health_check(request):
+    """Обработчик для проверки состояния сервиса Render"""
+    return web.Response(text="Bot is running!")
+
+async def start_http_server():
+    """Запуск HTTP-сервера для Render"""
+    app = web.Application()
+    app.router.add_get('/health', handle_health_check)
+    app.router.add_get('/', handle_health_check)
+    
+    # Используем порт из переменной окружения PORT, как рекомендует Render
+    port = int(os.environ.get('PORT', 10000))  # 10000 - порт по умолчанию для Render
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)  # Всегда bind к 0.0.0.0
+    await site.start()
+    logger.info(f"HTTP-сервер запущен на порту {port}")
+    return runner
+# --- Конец добавленного кода ---
+
 async def handle_updates():
     """Обработчик обновлений с обработкой исключений"""
     try:
@@ -930,6 +954,8 @@ async def main():
     storage_manager.load_from_file()
     
     try:
+        # --- Запускаем HTTP-сервер перед polling ---
+        http_runner = await start_http_server()
         bot_instance_running = True
         logger.info("Запуск polling...")
         await handle_updates()
@@ -940,6 +966,9 @@ async def main():
         raise
     finally:
         bot_instance_running = False
+        # Останавливаем HTTP-сервер
+        if 'http_runner' in locals():
+            await http_runner.cleanup()
         await bot.session.close()
         logger.info("Бот остановлен")
 
